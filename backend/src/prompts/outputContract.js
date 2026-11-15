@@ -1,3 +1,4 @@
+import { validateJSX } from "./jsxValidator.js";
 import { listComponentNames } from "../design-system/index.js";
 
 export const OUTPUT_SCHEMA_VERSION = "1.0.0";
@@ -39,6 +40,15 @@ export function validateGeneration(raw, { allowedComponents } = {}) {
       }
     }
   }
+  if (
+    typeof output.code === "string" &&
+    output.code.trim() &&
+    output.code.length <= 100000
+  ) {
+    const astResult = validateJSX(output.code, { allowedComponents });
+    diagnostics.push(...astResult.diagnostics);
+  }
+
   return { valid: diagnostics.length === 0, output, diagnostics };
 }
 // This is a fast response-contract check, NOT an AST parser, JSX compiler, or security sandbox.
