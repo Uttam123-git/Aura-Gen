@@ -1,0 +1,21 @@
+﻿{
+  "name": "auragen-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AuraGen AI backend for adaptive UI generation",
+  "scripts": {
+    "start": "node src/server/index.js",
+    "dev": "node --watch src/server/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.0.0",
+    "@langchain/openai": "^1.0.0",
+    "dotenv": "^17.0.0",
+    "ws": "^8.18.0"
+  }
+}
