@@ -1,0 +1,31 @@
+{
+  "formTitle": "Personal loan application",
+  "frictionPoint": {
+    "fieldId": "annualIncome",
+    "signals": ["rage_clicks", "long_hesitation"],
+    "note": "User clicked the income field 5 times in 2 seconds and paused for 6 seconds afterwards."
+  },
+  "formSchema": [
+    { "id": "fullName", "label": "Full legal name", "type": "text", "required": true },
+    { "id": "email", "label": "Email address", "type": "email", "required": true },
+    {
+      "id": "employment",
+      "label": "Employment status",
+      "type": "select",
+      "required": true,
+      "options": [
+        { "value": "salaried", "label": "Salaried" },
+        { "value": "self", "label": "Self-employed" },
+        { "value": "student", "label": "Student" }
+      ]
+    },
+    {
+      "id": "annualIncome",
+      "label": "Gross annual income",
+      "type": "number",
+      "required": true,
+      "helpText": "Total income before tax, including bonuses"
+    },
+    { "id": "consent", "label": "I authorise a credit check", "type": "checkbox", "required": true }
+  ]
+}
