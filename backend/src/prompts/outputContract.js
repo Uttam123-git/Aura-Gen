@@ -1,4 +1,5 @@
 import { validateJSX } from "./jsxValidator.js";
+import { parse } from "@babel/parser";
 import { listComponentNames } from "../design-system/index.js";
 
 export const OUTPUT_SCHEMA_VERSION = "1.0.0";
@@ -47,6 +48,43 @@ export function validateGeneration(raw, { allowedComponents } = {}) {
   ) {
     const astResult = validateJSX(output.code, { allowedComponents });
     diagnostics.push(...astResult.diagnostics);
+  }
+
+
+  if (
+    typeof output.code === "string" &&
+    output.code.trim() &&
+    typeof output.componentName === "string" &&
+    COMPONENT_NAME.test(output.componentName)
+  ) {
+    try {
+      const ast = parse(output.code, {
+        sourceType: "module",
+        plugins: ["jsx", "typescript"],
+      });
+
+      const exported = ast.program.body.find(
+        (node) => node.type === "ExportDefaultDeclaration"
+      );
+
+      const declaration = exported?.declaration;
+      const actualName =
+        declaration?.type === "FunctionDeclaration" ||
+        declaration?.type === "ClassDeclaration"
+          ? declaration.id?.name
+          : declaration?.type === "Identifier"
+            ? declaration.name
+            : null;
+
+      if (actualName && actualName !== output.componentName) {
+        diagnostics.push({
+          code: "COMPONENT_NAME_MISMATCH",
+          message: `Expected ${output.componentName}, but default export is ${actualName}`,
+        });
+      }
+    } catch {
+      // JSX syntax errors are reported by validateJSX.
+    }
   }
 
   return { valid: diagnostics.length === 0, output, diagnostics };
