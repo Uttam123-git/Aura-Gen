@@ -36,7 +36,7 @@ test("combined requests select matching examples", () => {
 
   assert.deepEqual(
     result.examples,
-    ["progress", "form"]
+    ["form", "progress"]
   );
 });
 
