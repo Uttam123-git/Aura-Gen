@@ -7,6 +7,10 @@ import { pathToFileURL } from "node:url";
 
 import { analyzeIntent } from "../prompts/intentAnalyzer.js";
 import { generateValidatedUI } from "../prompts/generationWorkflow.js";
+import {
+  fetchWithRetry,
+  ProviderError,
+} from "./providerRetry.js";
 
 const MAX_BODY = 16 * 1024;
 const MAX_REQUEST_LENGTH = 5000;
@@ -18,10 +22,13 @@ const ROUTES = new Map([
   ["/api/generate", "POST"],
 ]);
 
-export function createApp({ generate = createLLMAdapter() } = {}) {
+export function createApp({
+  generate = createLLMAdapter(),
+} = {}) {
   return createServer(async (req, res) => {
     const corsOrigin =
-      process.env.AURAGEN_CORS_ORIGIN || "http://localhost:5173";
+      process.env.AURAGEN_CORS_ORIGIN ||
+      "http://localhost:5173";
 
     const send = (status, data) => {
       res.writeHead(status, {
@@ -34,7 +41,6 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
       res.end(JSON.stringify(data));
     };
 
-    // Handle CORS preflight requests.
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
         "access-control-allow-origin": corsOrigin,
@@ -51,7 +57,6 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
       "http://localhost"
     ).pathname;
 
-    // Reject unknown API endpoints.
     if (!ROUTES.has(path)) {
       return send(404, {
         error: "NOT_FOUND",
@@ -59,7 +64,6 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
       });
     }
 
-    // Enforce the correct HTTP method for each endpoint.
     const allowedMethod = ROUTES.get(path);
 
     if (req.method !== allowedMethod) {
@@ -71,7 +75,6 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
       });
     }
 
-    // Health check does not require a request body.
     if (path === "/api/health") {
       return send(200, {
         status: "ok",
@@ -79,7 +82,6 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
       });
     }
 
-    // POST endpoints accept JSON only.
     const contentType = (
       req.headers["content-type"] || ""
     ).toLowerCase();
@@ -95,7 +97,6 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
       const chunks = [];
       let bodySize = 0;
 
-      // Enforce request size limits using byte counts.
       for await (const chunk of req) {
         bodySize += chunk.length;
 
@@ -109,12 +110,12 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
         chunks.push(chunk);
       }
 
-      const raw = Buffer.concat(chunks).toString("utf8");
-
       let body;
 
       try {
-        body = JSON.parse(raw);
+        body = JSON.parse(
+          Buffer.concat(chunks).toString("utf8")
+        );
       } catch {
         return send(400, {
           error: "INVALID_JSON",
@@ -122,7 +123,6 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
         });
       }
 
-      // Accept only the documented request structure.
       const validRequest =
         body !== null &&
         typeof body === "object" &&
@@ -130,7 +130,9 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
         typeof body.request === "string" &&
         body.request.trim().length > 0 &&
         body.request.length <= MAX_REQUEST_LENGTH &&
-        Object.keys(body).every((key) => key === "request");
+        Object.keys(body).every(
+          (key) => key === "request"
+        );
 
       if (!validRequest) {
         return send(400, {
@@ -140,22 +142,41 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
         });
       }
 
-      // Analyze natural-language UI requirements.
       if (path === "/api/analyze") {
-        const result = analyzeIntent(body.request);
-
-        return send(200, result);
+        return send(
+          200,
+          analyzeIntent(body.request)
+        );
       }
 
-      // Generate, validate, and optionally repair UI code.
       const result = await generateValidatedUI(
         body.request,
         generate,
         { maxRepairs: MAX_REPAIRS }
       );
 
-      return send(result.valid ? 200 : 422, result);
+      return send(
+        result.valid ? 200 : 422,
+        result
+      );
     } catch (error) {
+      if (error instanceof ProviderError) {
+        console.error(
+          "AuraGen provider failure:",
+          error.code,
+          error.status ?? ""
+        );
+
+        return send(
+          error.code === "PROVIDER_TIMEOUT" ? 504 : 502,
+          {
+            error: error.code,
+            message:
+              "AI generation is temporarily unavailable",
+          }
+        );
+      }
+
       if (
         error instanceof TypeError ||
         error instanceof RangeError
@@ -168,7 +189,9 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
 
       console.error(
         "AuraGen request failure:",
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error
+          ? error.message
+          : String(error)
       );
 
       return send(502, {
@@ -180,12 +203,6 @@ export function createApp({ generate = createLLMAdapter() } = {}) {
   });
 }
 
-/**
- * Creates an LLM adapter.
- *
- * Mock mode is intended for local integration testing.
- * Real mode calls the configured OpenAI chat completions API.
- */
 export function createLLMAdapter({
   apiKey = process.env.OPENAI_API_KEY,
   model = process.env.AURAGEN_MODEL || "gpt-4o-mini",
@@ -216,65 +233,48 @@ export function createLLMAdapter({
       );
     }
 
-    const controller = new AbortController();
-
-    const timeout = setTimeout(
-      () => controller.abort(),
-      30000
+    const response = await fetchWithRetry(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature: 0.2,
+          response_format: {
+            type: "json_object",
+          },
+        }),
+      }
     );
 
-    try {
-      const response = await fetch(
-        "https://api.openai.com/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${apiKey}`,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            model,
-            messages,
-            temperature: 0.2,
-            response_format: {
-              type: "json_object",
-            },
-          }),
-          signal: controller.signal,
-        }
+    const payload = await response.json();
+
+    const content =
+      payload.choices?.[0]?.message?.content;
+
+    if (typeof content !== "string") {
+      throw new Error(
+        "Provider response missing message content"
       );
-
-      if (!response.ok) {
-        throw new Error(
-          `Provider HTTP ${response.status}`
-        );
-      }
-
-      const payload = await response.json();
-
-      const content =
-        payload.choices?.[0]?.message?.content;
-
-      if (typeof content !== "string") {
-        throw new Error(
-          "Provider response missing message content"
-        );
-      }
-
-      return content;
-    } finally {
-      clearTimeout(timeout);
     }
+
+    return content;
   };
 }
 
-// Start the HTTP server when this file is executed directly.
 if (
   process.argv[1] &&
   import.meta.url ===
     pathToFileURL(resolve(process.argv[1])).href
 ) {
-  const port = Number(process.env.PORT || 8000);
+  const port = Number(
+    process.env.PORT || 8000
+  );
 
   if (
     !Number.isInteger(port) ||
