@@ -1,9 +1,13 @@
 
 /**
- * AuraGen provider retry utility.
+ * AuraGen provider retry and timeout utility.
  *
- * Retries transient HTTP failures using exponential backoff.
- * Each attempt has its own timeout.
+ * Supports:
+ * - Bounded retries for transient HTTP failures
+ * - Exponential backoff
+ * - Explicit per-attempt timeouts
+ * - AbortSignal cancellation
+ * - Controlled provider errors
  */
 
 const RETRYABLE_STATUS = new Set([
@@ -11,17 +15,60 @@ const RETRYABLE_STATUS = new Set([
 ]);
 
 const sleep = (milliseconds) =>
-  new Promise((resolve) => setTimeout(resolve, milliseconds));
+  new Promise((resolve) =>
+    setTimeout(resolve, milliseconds)
+  );
 
 export class ProviderError extends Error {
-  constructor(message, {
-    status = null,
-    code = "PROVIDER_ERROR",
-  } = {}) {
+  constructor(
+    message,
+    {
+      status = null,
+      code = "PROVIDER_ERROR",
+    } = {}
+  ) {
     super(message);
     this.name = "ProviderError";
     this.status = status;
     this.code = code;
+  }
+}
+
+async function fetchWithTimeout(
+  fetchImpl,
+  url,
+  options,
+  timeoutMs
+) {
+  const controller = new AbortController();
+
+  let timer;
+
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+
+      reject(
+        new ProviderError(
+          "Provider request timed out",
+          { code: "PROVIDER_TIMEOUT" }
+        )
+      );
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() =>
+        fetchImpl(url, {
+          ...options,
+          signal: controller.signal,
+        })
+      ),
+      timeoutPromise,
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -37,7 +84,9 @@ export async function fetchWithRetry(
   } = {}
 ) {
   if (typeof fetchImpl !== "function") {
-    throw new TypeError("fetchImpl must be a function");
+    throw new TypeError(
+      "fetchImpl must be a function"
+    );
   }
 
   if (
@@ -45,89 +94,87 @@ export async function fetchWithRetry(
     maxAttempts < 1 ||
     maxAttempts > 5
   ) {
-    throw new RangeError("maxAttempts must be 1..5");
+    throw new RangeError(
+      "maxAttempts must be 1..5"
+    );
   }
 
   if (
     !Number.isFinite(baseDelayMs) ||
     baseDelayMs < 0
   ) {
-    throw new RangeError("baseDelayMs must be nonnegative");
+    throw new RangeError(
+      "baseDelayMs must be nonnegative"
+    );
   }
 
   if (
     !Number.isFinite(timeoutMs) ||
     timeoutMs <= 0
   ) {
-    throw new RangeError("timeoutMs must be positive");
+    throw new RangeError(
+      "timeoutMs must be positive"
+    );
   }
 
   if (typeof sleepImpl !== "function") {
-    throw new TypeError("sleepImpl must be a function");
+    throw new TypeError(
+      "sleepImpl must be a function"
+    );
   }
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const controller = new AbortController();
-
-    const timeout = setTimeout(
-      () => controller.abort(),
-      timeoutMs
-    );
-
+  for (
+    let attempt = 1;
+    attempt <= maxAttempts;
+    attempt++
+  ) {
     try {
-      const response = await fetchImpl(url, {
-        ...options,
-        signal: controller.signal,
-      });
+      const response = await fetchWithTimeout(
+        fetchImpl,
+        url,
+        options,
+        timeoutMs
+      );
 
       if (response.ok) {
         return response;
       }
 
-      const error = new ProviderError(
+      throw new ProviderError(
         `Provider HTTP ${response.status}`,
         {
           status: response.status,
           code: "PROVIDER_HTTP_ERROR",
         }
       );
-
-      const shouldRetry =
-        RETRYABLE_STATUS.has(response.status) &&
-        attempt < maxAttempts;
-
-      if (!shouldRetry) {
-        throw error;
-      }
     } catch (error) {
-      // HTTP errors have already been classified.
       if (error instanceof ProviderError) {
+        // Timeout errors should terminate immediately.
+        if (error.code === "PROVIDER_TIMEOUT") {
+          throw error;
+        }
+
+        const retryable =
+          RETRYABLE_STATUS.has(error.status);
+
         if (
-          !RETRYABLE_STATUS.has(error.status) ||
+          !retryable ||
           attempt === maxAttempts
         ) {
           throw error;
         }
-      } else if (controller.signal.aborted) {
+      } else if (attempt === maxAttempts) {
         throw new ProviderError(
-          "Provider request timed out",
-          { code: "PROVIDER_TIMEOUT" }
+          "Provider network request failed",
+          { code: "PROVIDER_NETWORK_ERROR" }
         );
-      } else {
-        // Network errors may be transient.
-        if (attempt === maxAttempts) {
-          throw new ProviderError(
-            "Provider network request failed",
-            { code: "PROVIDER_NETWORK_ERROR" }
-          );
-        }
       }
-    } finally {
-      clearTimeout(timeout);
-    }
 
-    const delay = baseDelayMs * 2 ** (attempt - 1);
-    await sleepImpl(delay);
+      const delay =
+        baseDelayMs * 2 ** (attempt - 1);
+
+      await sleepImpl(delay);
+    }
   }
 
   throw new ProviderError(
